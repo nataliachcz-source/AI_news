@@ -6,98 +6,93 @@
  * writing reusable and conflict-free JavaScript components.
  */
 (function () {
+    // --- Configuration ---
+    // IMPORTANT: Replace 'YOUR_GNEWS_API_KEY' with the key you received from gnews.io
+    const API_KEY = 'YOUR_GNEWS_API_KEY';
+    const GNEWS_API_URL = `https://gnews.io/api/v4/search?q="artificial intelligence" OR "machine learning"&lang=en&max=10&token=${API_KEY}`;
+
+    // --- Caching Strategy ---
+    // To stay within the 100 requests/day limit, we cache results in the browser's localStorage.
+    // 8 hours * 60 minutes/hour * 60 seconds/minute * 1000 milliseconds/second = 28,800,000 ms
+    // This means we will fetch new data a maximum of 3 times per day per user.
+    const CACHE_DURATION_MS = 8 * 60 * 60 * 1000;
+    const CACHE_KEY = 'aiNewsCache';
+    const CACHE_TIMESTAMP_KEY = 'aiNewsCacheTimestamp';
+
     // --- DOM Element Selection ---
-    // We query the DOM once at the beginning for efficiency.
     const newsContainer = document.getElementById('news-container');
     const loader = document.getElementById('loader');
     const errorMessageContainer = document.getElementById('error-message');
 
     /**
-     * --- MOCK APIs ---
-     * In a real-world application, these functions would use the `fetch()` API
-     * to call real news endpoints. For this prototype, we simulate them to
-     * ensure the app is fully functional without external dependencies or API keys.
-     * Each function returns a Promise, just like a real `fetch()` call.
+     * Fetches news from the GNews API.
+     * This function now handles a real network request.
+     * @returns {Promise<Array>} A promise that resolves to an array of articles.
      */
+    async function fetchFromGNews() {
+        console.log("Fetching fresh news from GNews API...");
+        const response = await fetch(GNEWS_API_URL);
 
-    // Simulates fetching top headlines from a major AI news source.
-    function mockFetchAIHeadlines() {
-        console.log("Fetching from AI News Central...");
-        return new Promise(resolve => {
-            setTimeout(() => {
-                resolve([
-                    {
-                        title: "New Breakthrough in Large Language Models Allows for Real-Time Reasoning",
-                        url: "#",
-                        description: "Researchers have developed a novel architecture that significantly reduces the computational overhead of LLMs, paving the way for on-device AI.",
-                        source: "AI News Central",
-                        publishedAt: "2024-10-26T18:00:00Z"
-                    },
-                    {
-                        title: "Generative AI Creates Award-Winning Short Film",
-                        url: "#",
-                        description: "An AI model named 'Cinemind' has written, directed, and edited a short film that has won accolades at an independent film festival.",
-                        source: "AI News Central",
-                        publishedAt: "2024-10-26T14:30:00Z"
-                    }
-                ]);
-            }, 800); // Simulate 0.8s network delay
-        });
-    }
+        // Robustness: Check if the network request was successful.
+        if (!response.ok) {
+            // GNews provides error messages in its JSON response, so we try to parse them.
+            const errorData = await response.json();
+            throw new Error(errorData.errors[0] || `API request failed with status ${response.status}`);
+        }
 
-    // Simulates fetching posts from a popular tech blog or social feed.
-    function mockFetchTechBlogs() {
-        console.log("Fetching from The Tech Frontier Blog...");
-        return new Promise(resolve => {
-            setTimeout(() => {
-                resolve([
-                    {
-                        title: "Is AGI Closer Than We Think? A Deep Dive",
-                        url: "#",
-                        description: "A comprehensive analysis of the current state of Artificial General Intelligence research and the remaining hurdles.",
-                        source: "Tech Frontier",
-                        publishedAt: "2024-10-27T09:00:00Z"
-                    },
-                    {
-                        title: "How to Fine-Tune Your Own AI Model with Public Datasets",
-                        url: "#",
-                        description: "A step-by-step guide for developers looking to specialize open-source models for their own unique applications.",
-                        source: "Tech Frontier",
-                        publishedAt: "2024-10-25T11:00:00Z"
-                    }
-                ]);
-            }, 1200); // Simulate 1.2s network delay
-        });
+        const data = await response.json();
+
+        // Data Transformation: We map the API's data structure to our application's
+        // internal structure. This decouples our app from the specific API format,
+        // making it easy to switch or add sources later.
+        return data.articles.map(article => ({
+            title: article.title,
+            url: article.url,
+            description: article.description,
+            source: article.source.name, // GNews nests the source name
+            publishedAt: article.publishedAt
+        }));
     }
 
     /**
-     * Fetches news from all configured sources concurrently.
-     * Using Promise.all is highly efficient as it doesn't wait for one
-     * request to finish before starting the next.
+     * Fetches news from all sources, using a cache to avoid excessive API calls.
      * @returns {Promise<Array>} A promise that resolves to a sorted array of articles.
      */
     async function fetchAllNews() {
-        // This array is easily extendable with more sources in the future.
-        const sources = [
-            mockFetchAIHeadlines(),
-            mockFetchTechBlogs()
-            // e.g., await fetchFromTwitter(), await fetchFromReddit()
-        ];
+        const cachedTimestamp = localStorage.getItem(CACHE_TIMESTAMP_KEY);
+        const cachedNews = localStorage.getItem(CACHE_KEY);
 
-        // Promise.all waits for all promises to resolve. If any fails, it rejects.
-        const results = await Promise.all(sources);
+        // Check if a valid, non-stale cache exists.
+        if (cachedTimestamp && cachedNews && (Date.now() - cachedTimestamp < CACHE_DURATION_MS)) {
+            console.log("Loading news from cache. It's fresh enough!");
+            // If the cache is valid, parse it and return the data immediately.
+            // This completely avoids an API call.
+            return JSON.parse(cachedNews);
+        }
 
-        // The result is an array of arrays, so we flatten it into a single list.
-        const allArticles = results.flat();
+        // If cache is stale or doesn't exist, fetch new data.
+        console.log("Cache is stale or empty. Fetching new data from API.");
+        const articles = await fetchFromGNews(); // The only source for now
 
-        // Sort articles by publication date, newest first. This is crucial for a news feed.
-        allArticles.sort((a, b) => new Date(b.publishedAt) - new Date(a.publishedAt));
+        // Sort articles by publication date, newest first.
+        articles.sort((a, b) => new Date(b.publishedAt) - new Date(a.publishedAt));
 
-        return allArticles;
+        // Save the newly fetched data and the current timestamp to the cache.
+        // We use try-catch in case localStorage is full or disabled (e.g., in private browsing).
+        try {
+            localStorage.setItem(CACHE_KEY, JSON.stringify(articles));
+            localStorage.setItem(CACHE_TIMESTAMP_KEY, Date.now());
+            console.log("New data saved to cache.");
+        } catch (e) {
+            console.error("Failed to save to localStorage:", e);
+        }
+
+        return articles;
     }
 
     /**
      * Renders an array of article objects into the DOM.
+     * (This function remains unchanged as its logic is sound).
      * @param {Array} articles - The array of articles to display.
      */
     function renderArticles(articles) {
@@ -105,12 +100,7 @@
             newsContainer.innerHTML = '<p>No news articles found at this time.</p>';
             return;
         }
-
-        // For efficiency, we build the entire HTML string in memory and then
-        // update the DOM once. This is much faster than appending elements one by one in a loop.
         const articlesHtml = articles.map(article => {
-            // Sanitize by treating all API data as text content.
-            // Using template literals for clean and readable HTML structure.
             const title = article.title || 'Untitled Article';
             const url = article.url || '#';
             const description = article.description || 'No description available.';
@@ -128,42 +118,39 @@
                 </article>
             `;
         }).join('');
-
         newsContainer.innerHTML = articlesHtml;
     }
 
     /**
      * Displays an error message in the UI.
+     * (This function remains unchanged).
      * @param {string} message - The error message to show the user.
      */
     function displayError(message) {
         loader.style.display = 'none';
         errorMessageContainer.style.display = 'block';
-        errorMessageContainer.textContent = `Failed to load news: ${message}. Please try again later.`;
+        // A special check for the most common API key error.
+        if (message.includes("token")) {
+             errorMessageContainer.textContent = `API Key Error: Please check that you have correctly placed your GNews API key in the script.js file.`;
+        } else {
+             errorMessageContainer.textContent = `Failed to load news: ${message}. Please try again later.`;
+        }
     }
 
     /**
      * The main initialization function for the application.
-     * It orchestrates the fetching, rendering, and error handling.
+     * (This function remains unchanged).
      */
     async function init() {
-        // The try...catch block is essential for robustness. It gracefully
-        // handles any errors during the asynchronous fetching process.
         try {
-            // 1. Initial State: Show loader, hide content and errors.
             loader.style.display = 'block';
             errorMessageContainer.style.display = 'none';
             newsContainer.innerHTML = '';
-
-            // 2. Fetch data
+            
             const articles = await fetchAllNews();
-
-            // 3. Render data
             renderArticles(articles);
-
-            // 4. Final State: Hide loader, show content.
+            
             loader.style.display = 'none';
-
         } catch (error) {
             console.error("Initialization failed:", error);
             displayError(error.message || 'An unknown error occurred');
@@ -171,8 +158,6 @@
     }
 
     // --- Application Entry Point ---
-    // We wait for the DOM to be fully loaded before running our script.
-    // The `defer` attribute on the <script> tag also helps achieve this.
     document.addEventListener('DOMContentLoaded', init);
 
 })();
